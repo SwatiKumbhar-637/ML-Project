@@ -1,0 +1,146 @@
+# -----------------------------
+# price_recommender.py
+# -----------------------------
+
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
+import gradio as gr
+
+
+# -----------------------------
+# LOAD & PREPROCESS DATA
+# -----------------------------
+def load_and_prepare_data(csv_path):
+
+    data = pd.read_csv(csv_path, encoding='latin1')
+
+    # Aggregate customer level information
+    cust_agg = data.groupby("Customer ID")["Sales"].agg(["sum", "mean", "count"])
+    cust_agg.columns = ["total_spent", "avg_spent", "num_transactions"]
+    cust_agg = cust_agg.reset_index()
+
+    # Standardize features
+    scaler = StandardScaler()
+    scaled = scaler.fit_transform(cust_agg[["total_spent", "avg_spent", "num_transactions"]])
+
+    # K-Means Clustering
+    kmeans = KMeans(n_clusters=4, random_state=42)
+    cust_agg["cluster"] = kmeans.fit_predict(scaled)
+
+    # Label clusters (custom mapping)
+    cluster_labels = {
+        0: "High-Value",
+        1: "Discount Seekers",
+        2: "Bulk Buyers",
+        3: "General"
+    }
+
+    customers = cust_agg[["Customer ID", "cluster"]].copy()
+    customers["cluster_label"] = customers["cluster"].map(cluster_labels)
+
+    return data, customers
+
+
+# -----------------------------
+# GET CUSTOMER DETAILS
+# -----------------------------
+def get_customer_details(customers, customer_id):
+    row = customers[customers["Customer ID"] == customer_id]
+    if row.empty:
+        return None
+    c = row.iloc[0]
+    return {
+        "customer_id": customer_id,
+        "cluster": c["cluster_label"]
+    }
+
+
+# -----------------------------
+# GET BASE PRICE
+# -----------------------------
+def get_base_price(data, customer_id, product_name):
+
+    # If customer purchased before → return exact price
+    prev = data[
+        (data["Customer ID"] == customer_id) &
+        (data["Product Name"] == product_name)
+    ]
+
+    if not prev.empty:
+        return prev.iloc[0]["Sales"]
+
+    # Otherwise return mean product price
+    prod = data[data["Product Name"] == product_name]
+    if not prod.empty:
+        return prod["Sales"].mean()
+
+    return None
+
+
+# -----------------------------
+# GET ADJUSTED PRICE
+# -----------------------------
+def get_adjusted_price(customers, data, customer_id, product_name):
+
+    info = get_customer_details(customers, customer_id)
+    if info is None:
+        return "Customer not found"
+
+    cluster = info["cluster"]
+    base_price = get_base_price(data, customer_id, product_name)
+
+    if base_price is None:
+        return "Product not found"
+
+    # Pricing Strategy
+    if cluster == "High-Value":
+        final_price = base_price * 0.95
+
+    elif cluster == "Bulk Buyers":
+        final_price = base_price * 0.92
+
+    elif cluster == "Discount Seekers":
+        final_price = base_price * 0.88
+
+    else:
+        final_price = base_price * 1.05
+
+    return round(final_price, 2)
+
+
+# -----------------------------
+# GRADIO INTERFACE
+# -----------------------------
+def launch_price_recommendation_ui(csv_path):
+
+    data, customers = load_and_prepare_data(csv_path)
+
+    # Dropdown options
+    customer_options = sorted(data["Customer ID"].unique())
+    product_options = sorted(data["Product Name"].unique())
+
+    # Function for Gradio
+    def gradio_interface(customer_id, product_name):
+        details = get_customer_details(customers, customer_id)
+        base_price = get_base_price(data, customer_id, product_name)
+        adjusted_price = get_adjusted_price(customers, data, customer_id, product_name)
+        return details, base_price, adjusted_price
+
+    # UI
+    iface = gr.Interface(
+        fn=gradio_interface,
+        inputs=[
+            gr.Dropdown(label="Select Customer", choices=customer_options),
+            gr.Dropdown(label="Select Product", choices=product_options)
+        ],
+        outputs=[
+            gr.JSON(label="Customer Details"),
+            gr.Number(label="Base Price"),
+            gr.Number(label="Recommended Price")
+        ],
+        title="Smart Commerce Price Recommendation",
+        description="Dynamic pricing recommendation using clustering & profit optimization."
+    )
+
+    return iface
